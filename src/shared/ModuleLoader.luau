@@ -1,3 +1,6 @@
+-- Shared Module Loader for any roblox modulescripts that act as a service and should be manually loaded.
+-- Supports dependency resolution, client server environments, Init/Start lifecycle, and optional centralized Heartbeat loop.
+
 local RunService = game:GetService("RunService")
 local CollectionService = game:GetService("CollectionService")
 
@@ -5,10 +8,10 @@ local ServiceLoader = {}
 ServiceLoader.__index = ServiceLoader
 
 export type Options = {
-	root: Instance,          -- Folder to scan for ModuleScripts
-	env: "Client"|"Server"|"Shared"?, -- optional environment filter
-	autoStart: boolean?,     -- if true, Discover+InitAll+StartAll in new()
-	log: boolean?,           -- enable basic logging
+	root: Instance,                     -- Folder to scan for ModuleScripts
+	env: "Client"|"Server"|"Shared"?,   -- optional environment filter
+	autoStart: boolean?,                -- if true, Discover+InitAll+StartAll in new()
+	log: boolean?,                      -- enable basic logging
 }
 
 local function shallowCopy(t)
