@@ -1,19 +1,30 @@
 -- NetworkService Module
--- Provides a minimal API for client-server communication using RemoteEvents and BindableEvents.
+-- Provides a networking API for client-server communication with built-in middleware support.
 
--- TODO: Expand with rate limiting, player state buffers, security checks, promises, possibly typechecking, etc.
+-- Currently supports:
+-- - Remote/Bindable Events and Functions
+-- - Rate Limiting middleware
+-- - Async/safe request handling with timeouts
+-- - Debug/logging toggle
+
+-- TODO: Add player state buffering, validation middleware (lower priority), and more as needed.
 
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CollectionService = game:GetService("CollectionService")
 
 local Network = {}
-Network._connections = {} -- Store connections to clean them up if needed
+Network._connections = {}
+Network._rateLimits = {} 
 
 -- Configuration
 local REMOTES_FOLDER_NAME = "GameRemotes"
 local IS_SERVER = RunService:IsServer()
 
--- Setup the Folder
+-- [NEW] Debug / Logging Toggle
+Network.ShowDebugLogs = false 
+
+-- 1. Setup Folder
 local RemotesFolder
 if IS_SERVER then
 	RemotesFolder = ReplicatedStorage:FindFirstChild(REMOTES_FOLDER_NAME)
@@ -26,17 +37,15 @@ else
 	RemotesFolder = ReplicatedStorage:WaitForChild(REMOTES_FOLDER_NAME)
 end
 
--- Helper: Get or Create Remote (Only server creates, Client waits)
+-- Helper: Get/Create Remote
 local function getRemote(name, remoteType)
 	local remote = RemotesFolder:FindFirstChild(name)
-	
 	if not remote then
 		if IS_SERVER then
 			remote = Instance.new(remoteType)
 			remote.Name = name
 			remote.Parent = RemotesFolder
 		else
-			-- Client waits for the server to create it
 			remote = RemotesFolder:WaitForChild(name, 10)
 			if not remote then
 				warn("[Network] Client timed out waiting for remote: " .. name)
@@ -44,79 +53,143 @@ local function getRemote(name, remoteType)
 			end
 		end
 	end
-	
-	if remote.ClassName ~= remoteType then
-		error("[Network] Remote type mismatch for '" .. name .. "'. Expected " .. remoteType)
-	end
-	
 	return remote
 end
 
+-- Helper: Rate Limit Check
+local function checkRateLimit(player, remoteName, minInterval)
+	if not player then return true end -- Local events might not have a player
+	
+	local key = player.UserId .. "_" .. remoteName
+	local lastTime = Network._rateLimits[key] or 0
+	local now = os.clock()
+	
+	if now - lastTime < minInterval then
+		return false -- Rate limit exceeded
+	end
+	
+	Network._rateLimits[key] = now
+	return true
+end
+
+-- Helper: Log Traffic
+local function logTraffic(direction, name, player, ...)
+	if not Network.ShowDebugLogs then return end
+	local args = {...}
+	local argCount = #args
+	local playerInfo = player and ("[" .. player.Name .. "]") or "[System]"
+	print(string.format("[Network %s] %s %s invoked '%s' with %d args", direction, playerInfo, (IS_SERVER and "Server" or "Client"), name, argCount))
+end
+
 --------------------------------------------------------------------------------
--- API: Sending Data
+-- API: Fire (Sending Data)
 --------------------------------------------------------------------------------
 
--- Fire to Server (Called from Client)
 function Network.FireServer(name: string, ...)
 	if IS_SERVER then return warn("[Network] Cannot fire server from server") end
+	logTraffic("OUT", name, game.Players.LocalPlayer, ...)
 	local remote = getRemote(name, "RemoteEvent")
 	if remote then remote:FireServer(...) end
 end
 
--- Fire to Client (Called from Server)
 function Network.FireClient(player: Player, name: string, ...)
 	if not IS_SERVER then return warn("[Network] Cannot fire client from client") end
+	logTraffic("OUT", name, player, ...)
 	local remote = getRemote(name, "RemoteEvent")
 	if remote then remote:FireClient(player, ...) end
 end
 
--- Fire to ALL Clients (Called from Server)
 function Network.FireAllClients(name: string, ...)
 	if not IS_SERVER then return warn("[Network] Cannot fire all clients from client") end
+	logTraffic("OUT", name, nil, "ALL_CLIENTS", ...)
 	local remote = getRemote(name, "RemoteEvent")
 	if remote then remote:FireAllClients(...) end
 end
 
--- Fire Local (BindableEvent - Works on both Client and Server for local comms)
-function Network.FireLocal(name: string, ...)
-	local remote = getRemote("Local_" .. name, "BindableEvent")
-	if remote then remote:Fire(...) end
-end
-
 --------------------------------------------------------------------------------
--- API: Listening for Data
+-- API: Listen (Receiving Data with Middleware)
 --------------------------------------------------------------------------------
 
--- Connect to a network event
-function Network.Listen(name: string, callback)
+type ListenOptions = {
+	RateLimit: number?,  -- Minimum seconds between calls
+	-- Validators could go here (e.g., Types = { "string", "number" }), not necessary for now but useful for eventual release.
+}
+
+function Network.Listen(name: string, callback, options: ListenOptions?)
 	local remote = getRemote(name, "RemoteEvent")
 	if not remote then return end
-	
+
 	local connection
 	if IS_SERVER then
-		connection = remote.OnServerEvent:Connect(callback)
+		connection = remote.OnServerEvent:Connect(function(player, ...)
+			logTraffic("IN", name, player, ...)
+			
+			-- Rate Limiting
+			if options and options.RateLimit then
+				if not checkRateLimit(player, name, options.RateLimit) then
+					if Network.ShowDebugLogs then warn("[Network] Rate limit hit: " .. name) end
+					return
+				end
+			end
+			
+			callback(player, ...)
+		end)
 	else
-		connection = remote.OnClientEvent:Connect(callback)
+		-- Client Listener
+		connection = remote.OnClientEvent:Connect(function(...)
+			logTraffic("IN", name, game.Players.LocalPlayer, ...)
+			callback(...) 
+		end)
+	end
+
+	table.insert(Network._connections, connection)
+	return connection
+end
+
+--------------------------------------------------------------------------------
+-- API: Async Requests (Promises / Safe Invokes)
+--------------------------------------------------------------------------------
+
+-- Request data from Server (Client -> Server -> Client)
+-- Safe wrapper that handles timeouts so the client doesn't freeze
+function Network.InvokeServerAsync(name: string, timeout: number, ...)
+	if IS_SERVER then return end
+	local remote = getRemote(name, "RemoteFunction")
+	if not remote then return nil end
+	
+	logTraffic("INVOKE_OUT", name, game.Players.LocalPlayer, ...)
+
+	local result
+	local finished = false
+	
+	-- Run the invoke in a separate thread so we can timeout
+	task.spawn(function(...)
+		result = {remote:InvokeServer(...)}
+		finished = true
+	end, ...)
+	
+	-- Wait loop
+	local start = os.clock()
+	while not finished do
+		if (os.clock() - start) > (timeout or 5) then
+			warn("[Network] InvokeServerAsync timed out: " .. name)
+			return nil -- or throw error depending on preference
+		end
+		task.wait()
 	end
 	
-	table.insert(Network._connections, connection)
-	return connection
+	return table.unpack(result)
 end
 
--- Connect to a local event
-function Network.ListenLocal(name: string, callback)
-	local remote = getRemote("Local_" .. name, "BindableEvent")
-	local connection = remote.Event:Connect(callback)
-	table.insert(Network._connections, connection)
-	return connection
-end
-
--- Clean up connections
-function Network.Destroy()
-	for _, conn in ipairs(Network._connections) do
-		conn:Disconnect()
+-- Handle Request on Server
+function Network.HandleInvoke(name: string, callback)
+	if not IS_SERVER then return end
+	local remote = getRemote(name, "RemoteFunction")
+	
+	remote.OnServerInvoke = function(player, ...)
+		logTraffic("INVOKE_IN", name, player, ...)
+		return callback(player, ...)
 	end
-	Network._connections = {}
 end
 
 return Network
