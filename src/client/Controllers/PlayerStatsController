@@ -1,0 +1,74 @@
+-- PlayerStatsController.luau
+-- Client-side controller for managing and accessing player stats (health, food, water, stamina, etc.).
+-- Connects to PlayerStateService.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+
+local PlayerStatsController = {}
+PlayerStatsController.Name = "PlayerStatsController"
+
+-- Local Cache of Stats
+PlayerStatsController.Data = {
+	Health = 100,
+	MaxHealth = 100,
+	Food = 100,
+	Water = 100,
+	Stamina = 100,
+	Torpor = 0,
+	-- Add others as defaults to prevent nil errors before server sync
+}
+
+-- Signals (So UI doesn't have to poll in a loop)
+PlayerStatsController.StatsChanged = Instance.new("BindableEvent") 
+
+-- Dependencies
+local Network = nil
+
+function PlayerStatsController:Init(Framework)
+	Network = require(ReplicatedStorage.Shared.Network)
+	print("[PlayerStatsController] Initialized")
+end
+
+function PlayerStatsController:Start()
+	-- 1. Listen for the full data sync (Join)
+	Network.Listen("SyncStats", function(initialData)
+		for k, v in pairs(initialData) do
+			PlayerStatsController.Data[k] = v
+		end
+		-- Signal UI to do a full refresh
+		PlayerStatsController.StatsChanged:Fire("All", PlayerStatsController.Data)
+		print("[Stats] Initial data received")
+	end)
+
+	-- 2. Listen for single updates (Damage, Eating, Decay)
+	Network.Listen("StatChanged", function(statName, newValue)
+		local oldValue = PlayerStatsController.Data[statName]
+		PlayerStatsController.Data[statName] = newValue
+		
+		-- Signal UI to update just this specific bar
+		PlayerStatsController.StatsChanged:Fire(statName, newValue, oldValue)
+	end)
+	
+	-- Request data immediately in case we loaded late
+	Network.FireServer("RequestSync") 
+end
+
+--------------------------------------------------------------------------------
+-- Public API (For UI Scripts)
+--------------------------------------------------------------------------------
+
+-- Get a single value (e.g., for a label)
+function PlayerStatsController:GetStat(statName: string)
+	return self.Data[statName] or 0
+end
+
+-- Get a percentage (Useful for sizing UI Bars)
+function PlayerStatsController:GetPercent(currentStat: string, maxStat: string)
+	local cur = self.Data[currentStat] or 0
+	local max = self.Data[maxStat] or 100
+	if max == 0 then return 0 end
+	return math.clamp(cur / max, 0, 1)
+end
+
+return PlayerStatsController

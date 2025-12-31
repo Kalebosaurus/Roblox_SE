@@ -2,7 +2,7 @@
 -- Provides a networking API for client-server communication with built-in middleware support.
 
 -- Currently supports:
--- - Remote/Bindable Events and Functions
+-- - Remote Events and Functions
 -- - Rate Limiting middleware
 -- - Async/safe request handling with timeouts
 -- - Debug/logging toggle
@@ -21,10 +21,10 @@ Network._rateLimits = {}
 local REMOTES_FOLDER_NAME = "GameRemotes"
 local IS_SERVER = RunService:IsServer()
 
--- [NEW] Debug / Logging Toggle
+-- Debug / Logging Toggle
 Network.ShowDebugLogs = false 
 
--- 1. Setup Folder
+-- Setup Folder
 local RemotesFolder
 if IS_SERVER then
 	RemotesFolder = ReplicatedStorage:FindFirstChild(REMOTES_FOLDER_NAME)
@@ -85,6 +85,7 @@ end
 -- API: Fire (Sending Data)
 --------------------------------------------------------------------------------
 
+-- 'name' is the remote event name, this is required.
 function Network.FireServer(name: string, ...)
 	if IS_SERVER then return warn("[Network] Cannot fire server from server") end
 	logTraffic("OUT", name, game.Players.LocalPlayer, ...)
@@ -92,6 +93,7 @@ function Network.FireServer(name: string, ...)
 	if remote then remote:FireServer(...) end
 end
 
+-- Fire to a specific client specified by 'player'. 'name' is the remote event name, this is required.
 function Network.FireClient(player: Player, name: string, ...)
 	if not IS_SERVER then return warn("[Network] Cannot fire client from client") end
 	logTraffic("OUT", name, player, ...)
@@ -99,6 +101,7 @@ function Network.FireClient(player: Player, name: string, ...)
 	if remote then remote:FireClient(player, ...) end
 end
 
+-- Fire to ALL connected clients. 'name' is the remote event name, this is required.
 function Network.FireAllClients(name: string, ...)
 	if not IS_SERVER then return warn("[Network] Cannot fire all clients from client") end
 	logTraffic("OUT", name, nil, "ALL_CLIENTS", ...)
@@ -115,6 +118,9 @@ type ListenOptions = {
 	-- Validators could go here (e.g., Types = { "string", "number" }), not necessary for now but useful for eventual release.
 }
 
+-- Listen for events from Server (Server -> Client) or Client (Client -> Server)
+-- 'name' is the remote event name, 'callback' is the function to call when event is received.
+-- 'options' is an optional table for middleware settings like rate limiting.
 function Network.Listen(name: string, callback, options: ListenOptions?)
 	local remote = getRemote(name, "RemoteEvent")
 	if not remote then return end
